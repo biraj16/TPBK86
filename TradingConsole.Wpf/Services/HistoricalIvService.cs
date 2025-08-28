@@ -62,52 +62,46 @@ namespace TradingConsole.Wpf.Services
             }
         }
 
-        public void RecordDailyIv(string key, decimal highIv, decimal lowIv)
+        public void RecordIvSnapshot(string key, decimal currentIv)
         {
-            if (string.IsNullOrEmpty(key) || highIv <= 0 || lowIv <= 0) return;
+            if (string.IsNullOrEmpty(key) || currentIv <= 0) return;
 
             if (!_database.Records.ContainsKey(key))
             {
                 _database.Records[key] = new List<DailyIvRecord>();
             }
 
-            var todayRecord = _database.Records[key].FirstOrDefault(r => r.Date.Date == DateTime.Today);
+            // If a snapshot for today already exists, do nothing. This ensures we only capture the first one.
+            if (_database.Records[key].Any(r => r.Date.Date == DateTime.Today))
+            {
+                return;
+            }
 
-            if (todayRecord != null)
+            // Add the new snapshot record for the current day.
+            _database.Records[key].Add(new DailyIvRecord
             {
-                todayRecord.HighIv = Math.Max(todayRecord.HighIv, highIv);
-                todayRecord.LowIv = Math.Min(todayRecord.LowIv, lowIv);
-            }
-            else
-            {
-                _database.Records[key].Add(new DailyIvRecord
-                {
-                    Date = DateTime.Today,
-                    HighIv = highIv,
-                    LowIv = lowIv
-                });
-            }
+                Date = DateTime.Today,
+                SnapshotIv = currentIv,
+                SnapshotTimestamp = DateTime.UtcNow // Store the UTC timestamp for reference
+            });
+
+            Debug.WriteLine($"[HistoricalIvService] Recorded IV snapshot for {key}: {currentIv}");
         }
 
-        public (decimal high, decimal low) Get90DayIvRange(string key)
+        // --- THE FIX: This method now returns a list of historical snapshot values ---
+        public List<decimal> Get90DayIvHistory(string key)
         {
             if (!_database.Records.ContainsKey(key))
             {
-                return (0, 0);
+                return new List<decimal>();
             }
 
             var ninetyDaysAgo = DateTime.Today.AddDays(-90);
-            var relevantRecords = _database.Records[key].Where(r => r.Date >= ninetyDaysAgo).ToList();
 
-            if (!relevantRecords.Any())
-            {
-                return (0, 0);
-            }
-
-            var high = relevantRecords.Max(r => r.HighIv);
-            var low = relevantRecords.Min(r => r.LowIv);
-
-            return (high, low);
+            return _database.Records[key]
+                .Where(r => r.Date >= ninetyDaysAgo)
+                .Select(r => r.SnapshotIv)
+                .ToList();
         }
 
         private void PruneOldRecords()

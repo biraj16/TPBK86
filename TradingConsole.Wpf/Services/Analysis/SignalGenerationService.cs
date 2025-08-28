@@ -298,28 +298,29 @@ namespace TradingConsole.Wpf.Services
         public void UpdateIvMetrics(DashboardInstrument instrument, decimal underlyingPrice)
         {
             if (!instrument.InstrumentType.StartsWith("OPT") || instrument.ImpliedVolatility <= 0) return;
+
             var ivKey = GetHistoricalIvKey(instrument, underlyingPrice);
             if (string.IsNullOrEmpty(ivKey)) return;
-            if (!_stateManager.IntradayIvStates.ContainsKey(ivKey)) { _stateManager.IntradayIvStates[ivKey] = new IntradayIvState(); }
-            var ivState = _stateManager.IntradayIvStates[ivKey];
-            ivState.DayHighIv = Math.Max(ivState.DayHighIv, instrument.ImpliedVolatility);
-            ivState.DayLowIv = Math.Min(ivState.DayLowIv, instrument.ImpliedVolatility);
 
-            ivState.IvHistory.Add(instrument.ImpliedVolatility);
-            if (ivState.IvHistory.Count > 15)
+            // --- THE FIX: Logic to trigger the snapshot recording at the correct time ---
+            var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+            var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, istZone);
+
+            // Only attempt to record the IV snapshot after 10:30 AM IST.
+            // The logic in HistoricalIvService ensures it only happens once per day.
+            if (istNow.TimeOfDay >= new TimeSpan(10, 30, 0))
             {
-                ivState.IvHistory.RemoveAt(0);
+                _historicalIvService.RecordIvSnapshot(ivKey, instrument.ImpliedVolatility);
             }
 
-            _historicalIvService.RecordDailyIv(ivKey, ivState.DayHighIv, ivState.DayLowIv);
-            var (ivRank, ivPercentile) = CalculateIvRankAndPercentile(instrument.ImpliedVolatility, ivKey, ivState);
+            var (ivRank, ivPercentile) = CalculateIvRankAndPercentile(instrument.ImpliedVolatility, ivKey);
 
             var underlyingInstrument = _stateManager.AnalysisResults.Values.FirstOrDefault(r => r.Symbol == instrument.UnderlyingSymbol);
             if (underlyingInstrument != null)
             {
                 var result = _stateManager.GetResult(underlyingInstrument.SecurityId);
                 result.IvRank = ivRank;
-                result.IvPercentile = ivPercentile;
+                result.IvPercentile = ivPercentile; // Also update percentile
             }
         }
 
@@ -598,7 +599,35 @@ namespace TradingConsole.Wpf.Services
         }
 
 
-        private (decimal ivRank, decimal ivPercentile) CalculateIvRankAndPercentile(decimal currentIv, string key, IntradayIvState ivState) { var (histHigh, histLow) = _historicalIvService.Get90DayIvRange(key); if (histHigh == 0 || histLow == 0) return (0m, 0m); decimal histRange = histHigh - histLow; decimal ivRank = (histRange > 0) ? ((currentIv - histLow) / histRange) * 100 : 0m; return (Math.Max(0, Math.Min(100, Math.Round(ivRank, 2))), 0m); }
+        private (decimal ivRank, decimal ivPercentile) CalculateIvRankAndPercentile(decimal currentIv, string key)
+        {
+            // --- START OF MODIFIED LOGIC ---
+            const int minHistoryRequired = 10; // Define the minimum number of days required.
+
+            var ivHistory = _historicalIvService.Get90DayIvHistory(key);
+
+            // If we don't have enough historical data yet, return 0.
+            if (ivHistory == null || ivHistory.Count < minHistoryRequired)
+            {
+                return (0m, 0m);
+            }
+            // --- END OF MODIFIED LOGIC ---
+
+            // The rest of the calculation proceeds as before if enough data exists.
+            ivHistory.Add(currentIv);
+
+            decimal histHigh = ivHistory.Max();
+            decimal histLow = ivHistory.Min();
+
+            decimal histRange = histHigh - histLow;
+            decimal ivRank = (histRange > 0) ? ((currentIv - histLow) / histRange) * 100 : 0m;
+
+            int countBelow = ivHistory.Count(iv => iv < currentIv);
+            decimal ivPercentile = (ivHistory.Count > 0) ? ((decimal)countBelow / ivHistory.Count) * 100 : 0m;
+
+            return (Math.Max(0, Math.Min(100, Math.Round(ivRank, 2))),
+                    Math.Max(0, Math.Min(100, Math.Round(ivPercentile, 2))));
+        }
         private string GenerateVolatilityStateSignal(DashboardInstrument instrument, AnalysisResult result) { bool isAtrContracting = result.AtrSignal5Min == "Vol Contracting"; bool isIvRankLow = result.IvRank < 30; if (isAtrContracting && isIvRankLow) { _stateManager.IsInVolatilitySqueeze[instrument.SecurityId] = true; return "IV Squeeze Setup"; } return "Normal Volatility"; }
 
         #endregion
